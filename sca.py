@@ -1,4 +1,13 @@
 #!/usr/bin/python3
+#
+# Copyright © 2021 Toshiba corporation
+# Maintainer: Vu Thanh Tung (thanhtungvu.hust@gmail.com)
+#
+# SPDX-License-Identifier: MPL-2.0
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+#
 
 import csv
 import os
@@ -16,6 +25,9 @@ headers = {
                 Chrome/89.0.4389.114 Safari/537.36"
 }
 
+# Visited keywords
+visited = {}
+
 class BColors:
     HEADER = '\033[95m'
     OKBLUE = '\033[94m'
@@ -32,13 +44,26 @@ class Google:
     def search_by_url(self, key, winnowing):
         soup = ""
         with requests.Session() as s:
-            key = "\"" + key.strip().replace("\n"," ") + "\""
-            key = urllib.parse.quote(key) + "&hl=en"
-            url = "https://www.google.com/search?q=" + key
-            global headers
-            response = s.get(url, headers=headers)
+            key = key.strip().replace("\n"," ")
+            url = "https://www.google.com/search?q=\"" + urllib.parse.quote(key) + "\"&hl=en"
+            global headers, visited
+            if key in visited:
+                return []
+            visited[key] = 1
+            for _ in range(5):
+                try:
+                    response = s.get(url, headers=headers)
+                    break
+                except:
+                    print("Connection refused!! Wait for 10 seconds to continue...")
+                    time.sleep(10)
+                    print("Retrying...")
+                    continue
+            if response.status_code != 200:
+                print("Requests failed! Aborting...")
+                exit(1)
             soup = BeautifulSoup(response.content, 'html.parser')
-        if re.search("No results found for", soup.get_text()) and not winnowing:
+        if re.search(r"No results found for|Did you mean", soup.get_text()) and not winnowing:
             return []
         links = soup.find_all('a',{'href': re.compile('(htt.*://.*)')})
         urls = [re.split(":(?=http)", link.get("href"))[0] for link in links]
@@ -48,12 +73,16 @@ class Google:
         from googlesearch import search
         return [url for url in search(key, tld="co.in", num=10, stop=10, pause=2)]
 
-def search(key, backend, winnowing, winnow_kgrams, winnow_winsize, delay):
+def check_plagiarism(target, block, backend, fw, winnowing, \
+        winnow_kgrams, winnow_winsize, delay, output_format, quiet):
     urls = []
+    key = block[0].replace("\n", " ")
     if backend == "google-search":
         urls = Google.search_by_url(key, winnowing)
     elif backend == "google-api":
         urls = Google.search_by_api(key)
+    if len(urls) == 0:
+        return []
     if winnowing:
         import modules.winnowing as wn
         for url in urls:
@@ -64,6 +93,8 @@ def search(key, backend, winnowing, winnow_kgrams, winnow_winsize, delay):
                 print("Approx ratio of plagiarized content: ", ratio)
                 print(plCode_colored)
             time.sleep(delay)
+    if not quiet:
+        print(f"{BColors.OKCYAN}\nBlock \n'''\n%s\n''' is plagiarized\n{BColors.ENDC}" % block[0])
     return [url for url in urls]
 
 def read_blocks(target, lines):
@@ -84,7 +115,7 @@ def read_blocks(target, lines):
             counter = 0
         if line.strip():
             block[0] += line
-        counter += 1
+            counter += 1
         location += 1
     # Make sure the end block whose lines fewer than expected still included
     if block not in blocks:
@@ -113,44 +144,32 @@ def extract_text(url):
 
     return text
 
-def write_to_html(target, block, data, fw):
-    html = """
-        <tr>
-            <td>""" + target + ":%d-%d" % (block[1], block[2])  + """</td>
-            <td>""" + block[0].replace("\n","<br>") + """</td>
-            <td>
-                <ul>"""
-    for url in data:
+def write_report(target, block, urls, fw, format):
+    if format == "csv":
+        data = ""
+        for url in urls:
+            data += url + "\n"
+        value = [target + ":%d-%d" % (block[1], block[2]) , block[0], data]
+        writer = csv.writer(fw)
+        writer.writerow(value)
+    elif format == "html":
+        html = """
+            <tr>
+                <td>""" + target + ":%d-%d" % (block[1], block[2])  + """</td>
+                <td>""" + block[0].replace("\n","<br>") + """</td>
+                <td>
+                    <ul>"""
+        for url in urls:
+            html += """
+                    <li><a href=\""""+url+"""\">"""+url+"""</a></li>"""
         html += """
-                <li><a href=\""""+url+"""\">"""+url+"""</a></li>"""
-    html += """
-                </ul>
-            </td>
-        </tr>
-    """
-    fw.write(html)
-
-def write_to_csv(target, block, urls, fw):
-    data = ""
-    for url in urls:
-        data += url + "\n"
-    value = [target + ":%d-%d" % (block[1], block[2]) , block[0], data]
-    writer = csv.writer(fw)
-    writer.writerow(value)
-
-def search_and_write(target, block, backend, fw, winnowing, \
-                    winnow_kgrams, winnow_winsize, delay, output_format, quiet):
-    data = search(block[0].replace("\n", " "), backend, winnowing, winnow_kgrams, winnow_winsize, delay)
-    if len(data) == 0:
-        time.sleep(delay)
-        return
-    if not quiet:
-        print(f"{BColors.OKCYAN}\nBlock \n'''\n%s\n''' is plagiarized\n{BColors.ENDC}" % block[0])
-    if output_format == "html":
-        write_to_html(target, block, data, fw)
-    elif output_format == "csv":
-        write_to_csv(target, block, data, fw)
-    time.sleep(delay)
+                    </ul>
+                </td>
+            </tr>
+        """
+        fw.write(html)
+    else:
+        print("Unknown report format!")
 
 def scan(target, lines, backend, output_format, fw, winnowing, \
         winnow_kgrams, winnow_winsize, delay, quiet):
@@ -161,31 +180,37 @@ def scan(target, lines, backend, output_format, fw, winnowing, \
     elif os.path.isfile(os.path.abspath(target)):
         with open(os.path.abspath(target)) as fr:
             for block in read_blocks(fr.readlines(), lines):
-                search_and_write(target, block, backend, fw, winnowing, \
+                data = check_plagiarism(target, block, backend, fw, winnowing, \
                                 winnow_kgrams, winnow_winsize, delay, output_format, quiet)
+                if len(data) != 0:
+                    write_report(target, block, data, fw, output_format)
+                time.sleep(delay)
     else:
         for block in read_blocks([line+"\n" for line in target.splitlines()], lines):
-            search_and_write(target, block, backend, fw, winnowing, \
+            data = check_plagiarism(target, block, backend, fw, winnowing, \
                             winnow_kgrams, winnow_winsize, delay, output_format, quiet)
+            if len(data) != 0:
+                write_report(target, block, data, fw, output_format)
+            time.sleep(delay)
 
 def option_parser():
     parser = OptionParser()
     parser.add_option('-b', '--backend', dest="backend", default="google-search",
                     help="Search backend, choose one in (google-search, google-api)", metavar="BACKEND")
-    parser.add_option('--delay', dest="delay", default=5,
-                    help="Delay interval per requests", metavar="NUMBER")
+    parser.add_option('-d', '--delay', dest="delay", default=5,
+                    help="Delay interval per requests", metavar="INTEGER")
     parser.add_option('-l', '--lines', dest="lines", default=1,
-                    help="Number of lines per block", metavar="NUMBER")
+                    help="Number of lines per block", metavar="INTEGER")
     parser.add_option('-o', '--output', dest="output", default="result",
-                    help="Name of output file", metavar="OUTPUT")
-    parser.add_option('--format', dest="format", default="csv",
-                    help="Output format, choose one in (csv, html), default is csv", metavar="FORMAT")
+                    help="Name of report file", metavar="OUTPUT")
+    parser.add_option('-f', '--format', dest="format", default="csv",
+                    help="Report format, choose one in (csv, html), default is csv", metavar="FORMAT")
     parser.add_option('--winnowing', action="store_true", default=False,
                     help="Use winnow algorithm to analyze results", metavar="BOOLEAN")
     parser.add_option('--winnow-kgrams', dest='winnow_kgrams', default=4,
-                    help="Set noise threshold", metavar="NUMBER")
+                    help="Set noise threshold", metavar="INTEGER")
     parser.add_option('--winnow-winsize', dest="winnow_winsize", default=3,
-                    help="Window size", metavar="NUMBER")
+                    help="Window size", metavar="INTEGER")
     parser.add_option('-q','--quiet', action="store_true", default=False,
                     help="Don't print log of checking plagiarism")
     return parser.parse_args()
@@ -242,8 +267,9 @@ def main():
             scan(target, lines, backend, options.format, fw, winnowing, \
                 winnow_kgrams, winnow_winsize, delay, options.quiet)
         else:
-            print("Unknown format of output! Choose one in (csv, html)")
+            print("Unknown format of report! Choose one in (csv, html)")
             exit(1)
+    print("DONE.")        
 
 if __name__ == '__main__':
     try:
